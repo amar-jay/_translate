@@ -14,6 +14,10 @@ I hope I dont give up mid way
 
   - Improve it by using FlashAttention and rotational embedding taking nanoGPT as a reference.-
 
+- [ ] RMS Norm
+
 - [ ] rotational positional embedding
 
 - [ ] Group Query Attention
+
+- [ ] KV cache
