@@ -138,13 +138,13 @@ class EncoderBlock(nn.Module):
         self.attn = MultiheadAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, config.bias)
         self.mlp = MLP(config)
-
+        self.drop = nn.Dropout(config.dropout)
     def forward(self, x, mask):
         # why an input mask is necessary?
         # in translation tasks, we need to mask out the padding tokens
         x = self.ln_1(x)
-        x = x + self.attn(x, x, x, mask)
-        x = x + self.mlp(self.ln_2(x))
+        x = x + self.drop(self.attn(x, x, x, mask))
+        x = x + self.drop(self.mlp(self.ln_2(x)))
         return x
 
 class Encoder(nn.Module):
@@ -189,8 +189,7 @@ class DecoderBlock(nn.Module):
     def forward(self, target, encoded_input, input_mask):
         # why an input mask is necessary?
         # in translation tasks, we need to mask out the padding tokens
-        # NOTE: This is a slight deviation from the original implementation.
-        # in here, target is passed into a self-attention layer, then passed into a cross-attention layer
+        
         target = self.ln_1(target)
         target = target + self.drop(self.attn(target, target, target))
         target = self.ln_2(target)
@@ -237,6 +236,8 @@ class Transformer(nn.Module):
         self.device = device
         self.padding_idx = config.padding_idx
 
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, device=device)
+
         self.apply(self._init_weights)
 
         # apply special scaled init to the residual projections, per GPT-2 paper
@@ -260,16 +261,25 @@ class Transformer(nn.Module):
             n_params -= self.decoder.decoder.wpe.weight.numel()
         return n_params
 
-    def forward(self, input, target):
-        input_mask = (input != self.padding_idx).unsqueeze(1).unsqueeze(2)
+    def forward(self, inputs, targets=None):
+        input_mask = (inputs != self.padding_idx).unsqueeze(1).unsqueeze(2)
 
         #encoder feed through
-        encoded_input = self.encoder(input, input_mask)
+        encoded_inputs = self.encoder(inputs, input_mask)
 
         #decoder feed_through
-        output = self.decoder(target, encoded_input, input_mask)
+        outputs = self.decoder(targets, encoded_inputs, input_mask)
 
-        return output
+        if targets is not None:
+            # if we are given some desired targets also calculate the loss
+            logits = self.lm_head(outputs)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(outputs[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            loss = None
+
+        return logits, loss
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
