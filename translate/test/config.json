@@ -1,0 +1,1 @@
+{'block_size': 124, 'vocab_size': 412, 'n_layer': 12, 'n_head': 12, 'n_embd': 48, 'dropout': 0.0, 'bias': True, 'padding_idx': 0}

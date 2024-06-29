@@ -6,15 +6,24 @@ from torch import nn
 import torch.nn.functional as F
 
 @dataclass
-class T5Config:
+class TConfig:
     block_size: int = 1024
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    n_layer: int = 12 # number of layers - for both encoder and decoder blocks
+    n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    padding_idx: int = 0 # padding token index
+    padding_idx: int = 0 # padding token for input embeddings
+
+    def save_pretrained(self, save_directory):
+        if not os.path.exists(save_directory):
+            os.makedirs(save_directory)
+        with open(os.path.join(save_directory, "config.json"), "w") as f:
+            f.write(str(self))
+
+    def __str__(self):
+        return str(self.__dict__)
 
 class LayerNorm(nn.Module):
     """ 
@@ -36,7 +45,7 @@ class LayerNorm(nn.Module):
 class MLP(nn.Module):
     """ Simple Feed Forward Network with GELU activation. """
 
-    def __init__(self, config:T5Config):
+    def __init__(self, config:TConfig):
         super().__init__()
         # contextual fully connected.
         self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
@@ -105,7 +114,7 @@ class MultiheadAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.bias, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.bias, dropout_p=self.dropout if self.training else 0)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -122,7 +131,7 @@ class MultiheadAttention(nn.Module):
         return y
 
 class EncoderBlock(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: TConfig):
         super().__init__()
         # as said previously, pre-LN is better than post-LN.
         self.ln_1 = LayerNorm(config.n_embd, config.bias)
@@ -133,12 +142,13 @@ class EncoderBlock(nn.Module):
     def forward(self, x, mask):
         # why an input mask is necessary?
         # in translation tasks, we need to mask out the padding tokens
-        x = x + self.attn(self.ln_1(x), mask)
+        x = self.ln_1(x)
+        x = x + self.attn(x, x, x, mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
 class Encoder(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: TConfig):
         super().__init__()
         self.config = config
         self.encoder = nn.ModuleDict(dict(
@@ -157,7 +167,7 @@ class Encoder(nn.Module):
         self.coefficient = torch.sqrt(torch.FloatTensor([self.config.n_embd], device=device)) # is this necessary? since its a leaf tensor
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
         
-        y = self.dp((self.wte(input_ids) * self.coefficient) + self.wpe(pos))
+        y = self.encoder.drop((self.encoder.wte(input_ids) * self.coefficient) + self.encoder.wpe(pos))
 
         for layer in self.encoder.h:
             y = layer(y, input_mask)
@@ -166,7 +176,7 @@ class Encoder(nn.Module):
         return y
 
 class DecoderBlock(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: TConfig):
         super().__init__()
         # as said previously, pre-LN is better than post-LN.
         self.ln_1 = LayerNorm(config.n_embd, config.bias)
@@ -191,7 +201,7 @@ class DecoderBlock(nn.Module):
         return y
 
 class Decoder(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: TConfig):
         super().__init__()
         self.config = config
         self.decoder = nn.ModuleDict(dict(
@@ -202,7 +212,7 @@ class Decoder(nn.Module):
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
 
-    def forward(self, target, encoded_input, target_mask, input_mask):
+    def forward(self, target, encoded_input, input_mask):
         T = target.size(1)
         device = target.device
 
@@ -210,21 +220,22 @@ class Decoder(nn.Module):
         self.coefficient = torch.sqrt(torch.FloatTensor([self.config.n_embd], device=device)) # is this necessary? since its a leaf tensor
         pos = torch.arange(0, T, dtype=torch.long, device=device) # shape (t)
         
-        target = self.dp((self.wte(target) * self.coefficient) + self.wpe(pos))
+        target = self.decoder.drop((self.decoder.wte(target) * self.coefficient) + self.decoder.wpe(pos))
 
-        for layer in self.encoder.h:
-            target = layer(target, encoded_input, target_mask, input_mask)
+        for layer in self.decoder.h:
+            target = layer(target, encoded_input, input_mask)
 
-        target = self.encoder.ln_f(target)
+        target = self.decoder.ln_f(target)
         return target
 
 class Transformer(nn.Module):
-    def __init__(self, encoder:Encoder, decoder:Decoder, config:T5Config, device, padding_idx=0):
+    def __init__(self, encoder:Encoder, decoder:Decoder, config:TConfig, device):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
+        self.config = config
         self.device = device
-        self.padding_idx = padding_idx
+        self.padding_idx = config.padding_idx
 
         self.apply(self._init_weights)
 
@@ -234,8 +245,8 @@ class Transformer(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 
         # report number of parameters
-        print("total params: %.2fM\t\tnon-embedding params: %.2fM" % (self.get_num_params()/1e6,), (self.get_num_params(non_embedding=True)/1e6,))
 
+        print("total params: %.2fM\t\tnon-embedding params: %.2fM" % (self.get_num_params()/1e6,self.get_num_params(non_embedding=True)/1e6,))
     def get_num_params(self, non_embedding=True):
         """
         Return the number of parameters in the model.
@@ -283,17 +294,22 @@ class Transformer(nn.Module):
         pass
 
 if __name__ == "__main__":
-    print("runnn")
-    config = T5Config()
-    print("runnn")
+    print("Testing Transformer Model")
+    config = TConfig(block_size = 124, 
+                     vocab_size = 412, 
+                     n_layer = 12,
+                     n_head = 12,
+                     n_embd = 48,
+                     dropout = 0.0,
+                     bias = True,
+                     padding_idx = 0)
     encoder = Encoder(config)
-    print("runnn")
     decoder = Decoder(config)
-    print("runnn")
     model = Transformer(encoder, decoder, config, device='cuda')
-    input = torch.randint(0, 50304, (1, 1024))
-    target = torch.randint(0, 50304, (1, 1024))
+    input = torch.randint(0, 412, (1, 124))
+    target = torch.randint(0, 412, (1, 124))
     output = model(input, target)
-    print("runnn")
+    model.save_pretrained("test")
     print(output.size())
+    print("Done")
 
