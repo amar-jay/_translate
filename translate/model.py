@@ -191,6 +191,7 @@ class DecoderBlock(nn.Module):
         # in translation tasks, we need to mask out the padding tokens
         
         target = self.ln_1(target)
+        # attention is masked by default
         target = target + self.drop(self.attn(target, target, target))
         target = self.ln_2(target)
         encoded_input = self.ln_2(encoded_input)
