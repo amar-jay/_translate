@@ -4,6 +4,7 @@ import math
 import torch
 from torch import nn
 import torch.nn.functional as F
+import json
 
 @dataclass
 class TConfig:
@@ -16,11 +17,19 @@ class TConfig:
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     padding_idx: int = 0 # padding token for input embeddings
 
-    def save_pretrained(self, save_directory):
+    def save(self, save_directory):
         if not os.path.exists(save_directory):
             os.makedirs(save_directory)
         with open(os.path.join(save_directory, "config.json"), "w") as f:
             f.write(str(self))
+
+    def load(self, save_directory):
+        if not os.path.exists(save_directory):
+            raise FileNotFoundError(f"Directory {save_directory} does not exist")
+        with open(os.path.join(save_directory, "config.json"), "r") as f:
+            data = json.load(f)
+            self.__dict__.update(data)
+        return self
 
     def __str__(self):
         return str(self.__dict__)
@@ -295,13 +304,16 @@ class Transformer(nn.Module):
         if not os.path.exists(save_directory):
             os.makedirs(save_directory)
         #save config
-        self.config.save_pretrained(save_directory)
+        self.config.save(save_directory)
         # save model
         torch.save(self.state_dict(), os.path.join(save_directory, "pytorch_model.bin"))
 
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path):
+    def from_pretrained(cls, pretrained_model_directory):
+        # check if dir exists
+        if not os.path.exists(pretrained_model_directory):
+            raise Exception('Path %s does not exist' % pretrained_model_directory)
         pass
 
 if __name__ == "__main__":
@@ -316,11 +328,12 @@ if __name__ == "__main__":
                      padding_idx = 0)
     encoder = Encoder(config)
     decoder = Decoder(config)
-    model = Transformer(encoder, decoder, config, device='cuda')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = Transformer(encoder, decoder, config, device=device)
     input = torch.randint(0, 412, (1, 124))
     target = torch.randint(0, 412, (1, 124))
-    output = model(input, target)
+    logits, loss = model(input, target)
     model.save_pretrained("test")
-    print(output.size())
+    print(logits.size(), loss)
     print("Done")
 
